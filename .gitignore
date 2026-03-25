@@ -1,0 +1,51 @@
+# 🔹 Virtual Environment
+
+myenv/
+venv/
+env/
+
+# 🔹 Environment Variables
+
+.env
+
+# 🔹 Python Cache
+
+**pycache**/
+*.pyc
+*.pyo
+*.pyd
+
+# 🔹 Logs
+
+*.log
+
+# 🔹 OS Files
+
+.DS_Store
+Thumbs.db
+
+# 🔹 VS Code
+
+.vscode/
+
+# 🔹 PyCharm
+
+.idea/
+
+# 🔹 Jupyter Notebook
+
+.ipynb_checkpoints/
+
+# 🔹 Build / Distribution
+
+build/
+dist/
+*.egg-info/
+
+# 🔹 Chroma DB (optional - ignore if you don’t want to push DB)
+
+chroma_db/
+
+# 🔹 Uploaded files (if any)
+
+uploads/
