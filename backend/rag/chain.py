@@ -1,21 +1,22 @@
 from langchain_core.messages import HumanMessage
-from backend.rag.loader import get_retriever
 from dotenv import load_dotenv
+
 from backend.llm_model.model import get_llm
-import os
+from backend.rag.loader import get_retriever
 
 load_dotenv()
 
 
- 
+def get_prompt(context, query, history_text=""):
+    history_block = ""
+    if history_text:
+        history_block = f"\nConversation History:\n{history_text}\n"
 
-
-def get_prompt(context,query):
     return HumanMessage(
-            content=[
-                {
-                    "type": "text",
-                    "text": f"""
+        content=[
+            {
+                "type": "text",
+                "text": f"""
 You are a helpful AI assistant.
 
 Rules:
@@ -23,15 +24,16 @@ Rules:
 
 Context:
 {context}
+{history_block}
 
 Question:
 {query}
 
 Answer:
-"""
-                }
-            ]
-        )
+""",
+            }
+        ]
+    )
 
 
 def format_docs(docs):
@@ -41,34 +43,30 @@ def format_docs(docs):
 def get_rag_chain():
     retriever = get_retriever()
     llm = get_llm()
-     
 
-    def rag_pipeline(question: str):
+    def rag_pipeline(question: str, history_text: str = ""):
         try:
             docs = retriever.invoke(question)
 
-            # ✅ Handle no results
             if not docs:
                 return {
                     "answer": "No relevant information found.",
-                    "sources": []
+                    "sources": [],
                 }
 
             context = format_docs(docs)
-
-            final_prompt = get_prompt(context,question)
-
+            final_prompt = get_prompt(context, question, history_text)
             response = llm.invoke([final_prompt])
 
             return {
                 "answer": response.content,
-                "sources": [doc.metadata for doc in docs]
+                "sources": [doc.metadata.get("source") for doc in docs],
             }
 
         except Exception as e:
             return {
                 "answer": "Something went wrong while processing your request.",
-                "error": str(e)
+                "error": str(e),
             }
 
     return rag_pipeline

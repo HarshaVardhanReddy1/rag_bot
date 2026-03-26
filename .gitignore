@@ -49,3 +49,5 @@ chroma_db/
 # 🔹 Uploaded files (if any)
 
 uploads/
+
+node_modules/

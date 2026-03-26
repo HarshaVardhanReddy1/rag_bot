@@ -2,8 +2,8 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from bson import ObjectId
 
-from authentication.utils import decode_access_token
-from database import users_collection
+from backend.authentication.utils import decode_access_token
+from backend.database import users_collection
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")

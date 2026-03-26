@@ -1,6 +1,7 @@
 from pymongo import MongoClient
+from backend.settings import settings
 
-client = MongoClient("mongodb://localhost:27017/")
+client = MongoClient(settings.MONGO_URL or "mongodb://localhost:27017/")
 db = client["rag_bot_db"]
 
 users_collection = db["users"]
