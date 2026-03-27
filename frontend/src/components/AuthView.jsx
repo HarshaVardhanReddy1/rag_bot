@@ -26,8 +26,8 @@ export function AuthView({ mode, onModeChange, isLoading, onRegister, onLogin })
             <span>Create threads and reopen previous conversations.</span>
           </div>
           <div>
-            <strong>Images</strong>
-            <span>Attach a file and send it with your prompt.</span>
+            <strong>Documents</strong>
+            <span>Upload files and add them to the shared knowledge base.</span>
           </div>
         </div>
       </section>

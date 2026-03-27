@@ -8,6 +8,10 @@ export function ChatView({
   onChatTitleChange,
   onCreateChat,
   isCreatingChat,
+  documentFile,
+  onDocumentFileChange,
+  isUploadingDocument,
+  uploadInputKey,
   selectedChat,
   messages,
   isMessagesLoading,
@@ -123,9 +127,25 @@ export function ChatView({
             />
           </label>
 
+          <label className="file-field">
+            <span>Document attachment (optional)</span>
+            <input
+              key={uploadInputKey}
+              type="file"
+              accept=".pdf,.txt,.md"
+              onChange={(event) => onDocumentFileChange(event.target.files?.[0] || null)}
+              disabled={isSending || isUploadingDocument}
+            />
+            <strong>{documentFile ? documentFile.name : "Accepted: PDF, TXT, MD"}</strong>
+          </label>
+
           <div className="composer-actions">
-            <button className="primary-button send-button" type="submit" disabled={isSending}>
-              {isSending ? "Sending..." : "Send"}
+            <button
+              className="primary-button send-button"
+              type="submit"
+              disabled={isSending || isUploadingDocument}
+            >
+              {isUploadingDocument ? "Uploading..." : isSending ? "Sending..." : "Send"}
             </button>
           </div>
         </form>

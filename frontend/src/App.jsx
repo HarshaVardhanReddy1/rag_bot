@@ -4,8 +4,8 @@ import { ChatView } from "./components/ChatView";
 import "./styles.css";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
-const TOKEN_STORAGE_KEY = "project-image-token";
-const USER_STORAGE_KEY = "project-image-user-email";
+const TOKEN_STORAGE_KEY = "project-rag-token";
+const USER_STORAGE_KEY = "project-rag-user-email";
 
 const defaultRegisterForm = { name: "", email: "", password: "" };
 const defaultLoginForm = { email: "", password: "" };
@@ -109,6 +109,8 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [chatTitle, setChatTitle] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [documentFile, setDocumentFile] = useState(null);
+  const [uploadInputKey, setUploadInputKey] = useState(0);
   const [flash, setFlash] = useState({ type: "", text: "" });
 
   const [isAuthLoading, setIsAuthLoading] = useState(false);
@@ -116,6 +118,7 @@ function App() {
   const [isMessagesLoading, setIsMessagesLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
+  const [isUploadingDocument, setIsUploadingDocument] = useState(false);
 
   const messagesEndRef = useRef(null);
 
@@ -287,16 +290,18 @@ function App() {
         return;
       }
 
-      if (!prompt.trim()) {
-        showFlash("error", "Write something before sending.");
+      if (!prompt.trim() && !documentFile) {
+        showFlash("error", "Write a message or attach a document before sending.");
         return;
       }
 
       const promptText = prompt.trim();
-      const userMessage = createTempMessage("user", promptText);
+      const messageText = promptText || `Uploaded document: ${documentFile.name}`;
+      const userMessage = createTempMessage("user", messageText);
       const assistantMessageId = `assistant-${Date.now()}`;
 
       setIsSending(true);
+      setIsUploadingDocument(Boolean(documentFile));
       setMessages((current) => [
         ...current,
         userMessage,
@@ -306,16 +311,19 @@ function App() {
       clearFlash();
 
       try {
+        const formData = new FormData();
+        formData.append("chat_id", selectedChatId);
+        formData.append("query", promptText);
+        if (documentFile) {
+          formData.append("file", documentFile);
+        }
+
         const payload = await apiRequest("/chat", {
           method: "POST",
           headers: {
-            "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({
-            chat_id: selectedChatId,
-            query: promptText,
-          }),
+          body: formData,
         });
 
         const assistantText =
@@ -331,6 +339,8 @@ function App() {
           ),
         );
 
+        setDocumentFile(null);
+        setUploadInputKey((current) => current + 1);
         await Promise.all([loadMessages(selectedChatId), loadChats(selectedChatId)]);
       } catch (error) {
         setMessages((current) =>
@@ -346,9 +356,10 @@ function App() {
         showFlash("error", error.message);
       } finally {
         setIsSending(false);
+        setIsUploadingDocument(false);
       }
     },
-    [clearFlash, loadChats, loadMessages, prompt, selectedChatId, showFlash, token],
+    [clearFlash, documentFile, loadChats, loadMessages, prompt, selectedChatId, showFlash, token],
   );
 
   const handleLogout = useCallback(() => {
@@ -358,6 +369,8 @@ function App() {
     setSelectedChatId("");
     setMessages([]);
     setPrompt("");
+    setDocumentFile(null);
+    setUploadInputKey((current) => current + 1);
     showFlash("success", "Session cleared.");
   }, [setToken, setUserEmail, showFlash]);
 
@@ -369,9 +382,9 @@ function App() {
         <header className="page-header">
           <div>
             <p className="eyebrow">Project Image</p>
-            <h1>Simple AI chat with image support</h1>
+            <h1>Simple AI chat with document knowledge upload</h1>
             <p className="page-subtitle">
-              Sign in, create a chat, and send prompts against your RAG backend.
+              Sign in, upload knowledge documents, and chat against your RAG backend.
             </p>
           </div>
           {token ? (
@@ -402,6 +415,10 @@ function App() {
             onChatTitleChange={setChatTitle}
             onCreateChat={handleCreateChat}
             isCreatingChat={isCreatingChat}
+            documentFile={documentFile}
+            onDocumentFileChange={setDocumentFile}
+            isUploadingDocument={isUploadingDocument}
+            uploadInputKey={uploadInputKey}
             selectedChat={selectedChat}
             messages={messages}
             isMessagesLoading={isMessagesLoading}

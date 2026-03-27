@@ -37,15 +37,17 @@ Answer:
 
 
 def format_docs(docs):
-    return "\n\n".join([doc.page_content for doc in docs])
+    result ="\n\n".join([doc.page_content for doc in docs])
+    print(result)
+    return result
 
 
 def get_rag_chain():
-    retriever = get_retriever()
     llm = get_llm()
 
     def rag_pipeline(question: str, history_text: str = ""):
         try:
+            retriever = get_retriever()
             docs = retriever.invoke(question)
 
             if not docs:
