@@ -7,6 +7,7 @@ from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from backend.rag.logging_utils import log_execution_time
 
 load_dotenv()
 
@@ -57,6 +58,7 @@ def is_supported_document(file_path: Path):
     return file_path.suffix.lower() in SUPPORTED_EXTENSIONS
 
 
+@log_execution_time("load_document")
 def load_document(file_path: Path):
     suffix = file_path.suffix.lower()
 
@@ -78,6 +80,7 @@ def load_document(file_path: Path):
     return documents
 
 
+@log_execution_time("load_documents")
 def load_documents(path: Path):
     documents = []
 
@@ -102,6 +105,7 @@ def get_vectorstore():
     )
 
 
+@log_execution_time("split_documents")
 def split_documents(documents):
     if not documents:
         return []
@@ -110,6 +114,7 @@ def split_documents(documents):
     return sanitize_documents(splitter.split_documents(documents))
 
 
+@log_execution_time("seed_vectorstore_from_docs")
 def seed_vectorstore_from_docs():
     vectorstore = get_vectorstore()
 
@@ -125,6 +130,7 @@ def seed_vectorstore_from_docs():
     return vectorstore
 
 
+@log_execution_time("ingest_file")
 def ingest_file(file_path: Path, uploaded_by=None):
     documents = load_document(file_path)
 
