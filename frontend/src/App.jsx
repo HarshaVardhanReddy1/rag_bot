@@ -6,6 +6,7 @@ import "./styles.css";
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 const TOKEN_STORAGE_KEY = "project-rag-token";
 const USER_STORAGE_KEY = "project-rag-user-email";
+const SUPPORTED_DOCUMENT_TYPES = [".pdf", ".txt", ".md"];
 
 const defaultRegisterForm = { name: "", email: "", password: "" };
 const defaultLoginForm = { email: "", password: "" };
@@ -28,6 +29,30 @@ function createTempMessage(role, content, extra = {}) {
     created_at: new Date().toISOString(),
     ...extra,
   };
+}
+
+function getChatValidation({ prompt, documentFile, selectedChatId }) {
+  const errors = {};
+  const trimmedPrompt = prompt.trim();
+
+  if (!selectedChatId) {
+    errors.form = "Create a chat before sending a message.";
+  }
+
+  if (!trimmedPrompt && !documentFile) {
+    errors.prompt = "Write a message or attach a document before sending.";
+  }
+
+  if (documentFile) {
+    const fileName = documentFile.name || "";
+    const extension = fileName.slice(fileName.lastIndexOf(".")).toLowerCase();
+
+    if (!SUPPORTED_DOCUMENT_TYPES.includes(extension)) {
+      errors.file = `Unsupported file type. Allowed types: ${SUPPORTED_DOCUMENT_TYPES.join(", ")}`;
+    }
+  }
+
+  return errors;
 }
 
 async function apiRequest(path, options = {}) {
@@ -112,6 +137,7 @@ function App() {
   const [documentFile, setDocumentFile] = useState(null);
   const [uploadInputKey, setUploadInputKey] = useState(0);
   const [flash, setFlash] = useState({ type: "", text: "" });
+  const [chatValidation, setChatValidation] = useState({});
 
   const [isAuthLoading, setIsAuthLoading] = useState(false);
   const [isChatsLoading, setIsChatsLoading] = useState(false);
@@ -285,13 +311,13 @@ function App() {
     async (event) => {
       event.preventDefault();
 
-      if (!selectedChatId) {
-        showFlash("error", "Create a chat before sending a message.");
-        return;
-      }
-
-      if (!prompt.trim() && !documentFile) {
-        showFlash("error", "Write a message or attach a document before sending.");
+      const validationErrors = getChatValidation({ prompt, documentFile, selectedChatId });
+      if (Object.keys(validationErrors).length) {
+        setChatValidation(validationErrors);
+        showFlash(
+          "error",
+          validationErrors.form || validationErrors.file || validationErrors.prompt,
+        );
         return;
       }
 
@@ -307,6 +333,7 @@ function App() {
         userMessage,
         createTempMessage("assistant", "", { id: assistantMessageId }),
       ]);
+      setChatValidation({});
       setPrompt("");
       clearFlash();
 
@@ -343,6 +370,10 @@ function App() {
         setUploadInputKey((current) => current + 1);
         await Promise.all([loadMessages(selectedChatId), loadChats(selectedChatId)]);
       } catch (error) {
+        setChatValidation((current) => ({
+          ...current,
+          form: error.message || "Unable to complete the request.",
+        }));
         setMessages((current) =>
           current.map((message) =>
             message.id === assistantMessageId
@@ -370,6 +401,7 @@ function App() {
     setMessages([]);
     setPrompt("");
     setDocumentFile(null);
+    setChatValidation({});
     setUploadInputKey((current) => current + 1);
     showFlash("success", "Session cleared.");
   }, [setToken, setUserEmail, showFlash]);
@@ -416,7 +448,10 @@ function App() {
             onCreateChat={handleCreateChat}
             isCreatingChat={isCreatingChat}
             documentFile={documentFile}
-            onDocumentFileChange={setDocumentFile}
+            onDocumentFileChange={(file) => {
+              setDocumentFile(file);
+              setChatValidation((current) => ({ ...current, file: "", prompt: "", form: "" }));
+            }}
             isUploadingDocument={isUploadingDocument}
             uploadInputKey={uploadInputKey}
             selectedChat={selectedChat}
@@ -424,10 +459,14 @@ function App() {
             isMessagesLoading={isMessagesLoading}
             formatTime={formatTime}
             prompt={prompt}
-            onPromptChange={setPrompt}
+            onPromptChange={(value) => {
+              setPrompt(value);
+              setChatValidation((current) => ({ ...current, prompt: "", form: "" }));
+            }}
             onSendMessage={handleSendMessage}
             isSending={isSending}
             messagesEndRef={messagesEndRef}
+            validationErrors={chatValidation}
           />
         )}
       </div>

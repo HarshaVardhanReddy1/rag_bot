@@ -243,10 +243,20 @@ button {
   outline: none;
 }
 
+.input-error {
+  border-color: #f87171 !important;
+  background: #fff5f5 !important;
+}
+
 .form-grid input:focus,
 .composer-box textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+}
+
+.input-error:focus {
+  border-color: #dc2626 !important;
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.12) !important;
 }
 
 .primary-button,
@@ -410,6 +420,13 @@ button {
   margin-top: 8px;
   font-size: 0.9rem;
   color: var(--text);
+}
+
+.field-error {
+  margin: 6px 0 0;
+  color: var(--danger);
+  font-size: 0.88rem;
+  line-height: 1.4;
 }
 
 .empty-box {

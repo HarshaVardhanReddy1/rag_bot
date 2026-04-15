@@ -21,6 +21,7 @@ export function ChatView({
   onSendMessage,
   isSending,
   messagesEndRef,
+  validationErrors,
 }) {
   return (
     <main className="chat-layout">
@@ -116,20 +117,27 @@ export function ChatView({
         </div>
 
         <form className="composer-box" onSubmit={onSendMessage}>
+          {validationErrors?.form ? <p className="field-error">{validationErrors.form}</p> : null}
+
           <label>
             <span>Prompt</span>
             <textarea
+              className={validationErrors?.prompt ? "input-error" : ""}
               value={prompt}
               onChange={(event) => onPromptChange(event.target.value)}
               placeholder="Ask something about your documents..."
               rows={4}
               disabled={isSending}
             />
+            {validationErrors?.prompt ? (
+              <small className="field-error">{validationErrors.prompt}</small>
+            ) : null}
           </label>
 
           <label className="file-field">
             <span>Document attachment (optional)</span>
             <input
+              className={validationErrors?.file ? "input-error" : ""}
               key={uploadInputKey}
               type="file"
               accept=".pdf,.txt,.md"
@@ -137,6 +145,9 @@ export function ChatView({
               disabled={isSending || isUploadingDocument}
             />
             <strong>{documentFile ? documentFile.name : "Accepted: PDF, TXT, MD"}</strong>
+            {validationErrors?.file ? (
+              <small className="field-error">{validationErrors.file}</small>
+            ) : null}
           </label>
 
           <div className="composer-actions">

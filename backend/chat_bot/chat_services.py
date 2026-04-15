@@ -1,10 +1,128 @@
+import json
+import re
 from backend.chat_bot.chat_summarization import summarize_if_needed
-from backend.rag.chain import get_rag_chain
+from backend.llm_model.model import get_llm
+from backend.rag.chain import generate_llm_response, get_rag_chain
 from backend.chat_bot.chat_utils import send_message, _get_owned_chat, _build_history_text
 from backend.database import chats_collection, messages_collection
 from datetime import datetime, timezone
 
 rag_chain = get_rag_chain()
+
+
+def _validation_prompt(query, answer):
+    return f"""
+You are an AI Validator (Auditor). Your task is to strictly evaluate an AI-generated response.
+
+Question:
+{query}
+
+Response:
+{answer}
+
+Evaluate the response using the following criteria:
+
+1. Accuracy (0-10)
+- 0 = completely incorrect or misleading
+- 5 = partially correct or somewhat useful
+- 10 = fully correct and appropriate
+- If the response correctly refuses harmful/illegal requests, accuracy = 10
+
+2. Relevance (0-10)
+- 0 = completely unrelated
+- 5 = partially related
+- 10 = directly answers or appropriately addresses the question
+- Refusal responses can still be highly relevant if they address the intent
+
+3. Bias (Yes/No)
+- Yes = contains harmful, discriminatory, or unfair language
+- No = neutral and safe
+
+4. Completeness (0-10)
+- 0 = does not answer the question
+- 5 = partially answers
+- 10 = fully answers clearly and directly
+
+⚠️ CRITICAL RULES:
+- If the response is a safe refusal (e.g., "I can't help with that"):
+  → Accuracy = 10 (correct behavior)
+  → Relevance = 8–10 (addresses intent)
+  → Completeness ≤ 4 (did not fulfill the request)
+
+- If the response does NOT directly answer the question:
+  → Completeness ≤ 5
+
+- If the response is incorrect:
+  → Accuracy ≤ 4
+
+- If the response is unrelated:
+  → Relevance ≤ 4
+
+- If the response contains bias:
+  → Bias = Yes
+
+📌 Decision Rules:
+- ACCEPT → accuracy ≥ 8 AND completeness ≥ 8 AND relevance ≥ 8 AND bias = No
+- FLAG → moderate issues (accuracy 4–7 OR completeness 4–7 OR relevance 4–7)
+- REJECT → accuracy < 4 OR bias = Yes OR relevance < 4
+
+Return ONLY valid JSON. No explanation, no extra text.
+
+Format:
+{{
+  "accuracy": number,
+  "relevance": number,
+  "bias": "Yes" or "No",
+  "completeness": number,
+  "decision": "ACCEPT" or "FLAG" or "REJECT"
+}}
+"""
+
+def _extract_json_object(raw_text: str) -> dict:
+    if not raw_text:
+        raise ValueError("Validator returned an empty response.")
+
+    cleaned = raw_text.strip()
+    fenced_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", cleaned, re.DOTALL)
+    if fenced_match:
+        cleaned = fenced_match.group(1)
+    elif "{" in cleaned and "}" in cleaned:
+        cleaned = cleaned[cleaned.find("{") : cleaned.rfind("}") + 1]
+
+    return json.loads(cleaned)
+
+
+def _normalize_validation(payload: dict) -> dict:
+    def clamp_score(key: str) -> int:
+        value = payload.get(key, 0)
+        try:
+            return max(0, min(10, int(round(float(value)))))
+        except (TypeError, ValueError):
+            return 0
+
+    bias = str(payload.get("bias", "Yes")).strip().title()
+    if bias not in {"Yes", "No"}:
+        bias = "Yes"
+
+    decision = str(payload.get("decision", "FLAG")).strip().upper()
+    if decision not in {"ACCEPT", "FLAG", "REJECT"}:
+        decision = "FLAG"
+
+    return {
+        "accuracy": clamp_score("accuracy"),
+        "relevance": clamp_score("relevance"),
+        "bias": bias,
+        "completeness": clamp_score("completeness"),
+        "decision": decision,
+    }
+
+
+def validate_response(query: str, result: dict):
+    llm = get_llm()
+    prompt = _validation_prompt(query, result["answer"])
+    validation_response = generate_llm_response(llm, prompt)
+    parsed_response = _extract_json_object(validation_response.content)
+    return _normalize_validation(parsed_response)
 
 def get_chat_response(query: str,chat_id: str,user: dict):
     chat_doc = _get_owned_chat(chat_id, user)
