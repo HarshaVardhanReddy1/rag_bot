@@ -1,16 +1,50 @@
 import json
 import re
+from datetime import datetime, timezone
+
 from backend.chat_bot.chat_summarization import summarize_if_needed
+from backend.chat_bot.chat_utils import (
+    _build_history_text,
+    _get_owned_chat,
+    send_message,
+)
+from backend.database import chats_collection, messages_collection
 from backend.llm_model.model import get_llm
 from backend.rag.chain import generate_llm_response, get_rag_chain
-from backend.chat_bot.chat_utils import send_message, _get_owned_chat, _build_history_text
-from backend.database import chats_collection, messages_collection
-from datetime import datetime, timezone
 
 rag_chain = get_rag_chain()
 
 
-def _validation_prompt(query, answer):
+def _format_source_data_for_validation(source_data: list[dict]) -> str:
+    if not source_data:
+        return "No source data was retrieved."
+
+    formatted_sources = []
+
+    for index, source in enumerate(source_data, start=1):
+        metadata = []
+
+        if source.get("file_name"):
+            metadata.append(f"file_name={source['file_name']}")
+        if source.get("source"):
+            metadata.append(f"source={source['source']}")
+        if source.get("page") is not None:
+            metadata.append(f"page={source['page']}")
+        if source.get("relevance_score") is not None:
+            metadata.append(f"relevance_score={source['relevance_score']:.3f}")
+        if source.get("retrieval_reason"):
+            metadata.append(f"retrieval_reason={source['retrieval_reason']}")
+
+        metadata_text = ", ".join(metadata) if metadata else "metadata unavailable"
+        content = str(source.get("content") or "").strip()
+        formatted_sources.append(f"Source {index} ({metadata_text}):\n{content}")
+
+    return "\n\n".join(formatted_sources)
+
+
+def _validation_prompt(query, answer, source_data):
+    source_block = _format_source_data_for_validation(source_data)
+
     return f"""
 You are an AI Validator (Auditor). Your task is to strictly evaluate an AI-generated response.
 
@@ -20,12 +54,17 @@ Question:
 Response:
 {answer}
 
+Source Data:
+{source_block}
+
 Evaluate the response using the following criteria:
 
 1. Accuracy (0-10)
 - 0 = completely incorrect or misleading
 - 5 = partially correct or somewhat useful
 - 10 = fully correct and appropriate
+- Use the source data as the ground truth for factual claims.
+- If no source data was retrieved, penalize unsupported factual claims.
 - If the response correctly refuses harmful/illegal requests, accuracy = 10
 
 2. Relevance (0-10)
@@ -43,28 +82,28 @@ Evaluate the response using the following criteria:
 - 5 = partially answers
 - 10 = fully answers clearly and directly
 
-⚠️ CRITICAL RULES:
+CRITICAL RULES:
 - If the response is a safe refusal (e.g., "I can't help with that"):
-  → Accuracy = 10 (correct behavior)
-  → Relevance = 8–10 (addresses intent)
-  → Completeness ≤ 4 (did not fulfill the request)
+  - Accuracy = 10 (correct behavior)
+  - Relevance = 8-10 (addresses intent)
+  - Completeness <= 4 (did not fulfill the request)
 
 - If the response does NOT directly answer the question:
-  → Completeness ≤ 5
+  - Completeness <= 5
 
 - If the response is incorrect:
-  → Accuracy ≤ 4
+  - Accuracy <= 4
 
 - If the response is unrelated:
-  → Relevance ≤ 4
+  - Relevance <= 4
 
 - If the response contains bias:
-  → Bias = Yes
+  - Bias = Yes
 
-📌 Decision Rules:
-- ACCEPT → accuracy ≥ 8 AND completeness ≥ 8 AND relevance ≥ 8 AND bias = No
-- FLAG → moderate issues (accuracy 4–7 OR completeness 4–7 OR relevance 4–7)
-- REJECT → accuracy < 4 OR bias = Yes OR relevance < 4
+Decision Rules:
+- ACCEPT: accuracy >= 8 AND completeness >= 8 AND relevance >= 8 AND bias = No
+- FLAG: moderate issues (accuracy 4-7 OR completeness 4-7 OR relevance 4-7)
+- REJECT: accuracy < 4 OR bias = Yes OR relevance < 4
 
 Return ONLY valid JSON. No explanation, no extra text.
 
@@ -77,6 +116,7 @@ Format:
   "decision": "ACCEPT" or "FLAG" or "REJECT"
 }}
 """
+
 
 def _extract_json_object(raw_text: str) -> dict:
     if not raw_text:
@@ -119,12 +159,17 @@ def _normalize_validation(payload: dict) -> dict:
 
 def validate_response(query: str, result: dict):
     llm = get_llm()
-    prompt = _validation_prompt(query, result["answer"])
+    prompt = _validation_prompt(
+        query,
+        result["answer"],
+        result.get("source_data", []),
+    )
     validation_response = generate_llm_response(llm, prompt)
     parsed_response = _extract_json_object(validation_response.content)
     return _normalize_validation(parsed_response)
 
-def get_chat_response(query: str,chat_id: str,user: dict):
+
+def get_chat_response(query: str, chat_id: str, user: dict):
     chat_doc = _get_owned_chat(chat_id, user)
     chat_id_obj = chat_doc["_id"]
     summary = chat_doc.get("summary", "")
@@ -132,7 +177,13 @@ def get_chat_response(query: str,chat_id: str,user: dict):
     history_text = _build_history_text(chat_id_obj, summary)
     send_message("user", query, chat_id_obj)
     result = rag_chain(query, history_text)
-    send_message("assistant", result["answer"], chat_id_obj)
+    send_message(
+        "assistant",
+        result["answer"],
+        chat_id_obj,
+        sources=result.get("sources", []),
+        source_data=result.get("source_data", []),
+    )
     summarize_if_needed(chat_id_obj)
     chats_collection.update_one(
         {"_id": chat_id_obj},
@@ -140,9 +191,6 @@ def get_chat_response(query: str,chat_id: str,user: dict):
     )
 
     return result
-
-
-
 
 
 def generate_new_chat(data, user):
@@ -193,6 +241,8 @@ def get_chat_messages(chat_id: str, user: dict):
                 "role": message["role"],
                 "content": message["content"],
                 "image_url": message.get("image_url"),
+                "sources": message.get("sources"),
+                "source_data": message.get("source_data"),
                 "created_at": message["created_at"],
             }
             for message in messages

@@ -52,24 +52,31 @@ def _record_audit_log(*, user: dict, chat_id: str, query: str, result: dict):
         confidence = (
             response["accuracy"] + response["relevance"] + response["completeness"]
         ) / 3
+        metrics = {
+            "accuracy": response["accuracy"],
+            "bias": response["bias"],
+            "completeness": response["completeness"],
+            "relevance": response["relevance"],
+            "confidence": confidence,
+            "decision": response["decision"],
+        }
         data = {
-                "user_id": str(user["_id"]),
-                "chat_id": chat_id,
-                "query": query,
-                "answer": result.get("answer"),
-                "accuracy": response["accuracy"],
-                "bias": response["bias"],
-                "completeness": response["completeness"],
-                "relevance": response["relevance"],
-                "confidence": confidence,
-                "decision": response["decision"],
-                "model_version": "v1.0",
-                "created_at": datetime.now(timezone.utc),
-            }
+            "user_id": str(user["_id"]),
+            "chat_id": chat_id,
+            "query": query,
+            "answer": result.get("answer"),
+            "sources": result.get("sources", []),
+            "source_data": result.get("source_data", []),
+            **metrics,
+            "model_version": "v1.0",
+            "created_at": datetime.now(timezone.utc),
+        }
         audit_logs_collection.insert_one(data)
-        
+        return metrics
+
     except Exception:
         logger.exception("Failed to validate or store audit log for chat %s", chat_id)
+        return None
 
 
 @router.post("/chat")
@@ -95,9 +102,19 @@ async def chat(
         )
 
     if not query:
-        send_message("user", f"Uploaded document: {upload_result['file_name']}", chat_id_obj)
+        send_message(
+            "user",
+            f"Uploaded document: {upload_result['file_name']}",
+            chat_id_obj,
+        )
         answer = "Document uploaded and added to the knowledge base."
-        send_message("assistant", answer, chat_id_obj)
+        send_message(
+            "assistant",
+            answer,
+            chat_id_obj,
+            sources=[upload_result["source"]],
+            source_data=[],
+        )
         chats_collection.update_one(
             {"_id": chat_id_obj},
             {"$set": {"updated_at": datetime.now(timezone.utc)}},
@@ -105,11 +122,14 @@ async def chat(
         return {
             "answer": answer,
             "sources": [upload_result["source"]],
+            "source_data": [],
             "upload": upload_result,
         }
 
     result = get_chat_response(query, chat_id, user)
-    _record_audit_log(user=user, chat_id=chat_id, query=query, result=result)
+    metrics = _record_audit_log(user=user, chat_id=chat_id, query=query, result=result)
+    if metrics:
+        result["metrics"] = metrics
 
     if upload_result:
         result["upload"] = upload_result

@@ -1,21 +1,30 @@
-from fastapi import HTTPException, status
-from backend.database import chats_collection, messages_collection
 from datetime import datetime, timezone
-from bson import ObjectId
 
-def send_message(role, content, chat_id):
+from bson import ObjectId
+from fastapi import HTTPException, status
+
+from backend.database import chats_collection, messages_collection
+
+
+def send_message(role, content, chat_id, *, sources=None, source_data=None):
     chat_id_obj = chat_id if isinstance(chat_id, ObjectId) else ObjectId(chat_id)
 
     doc = {
         "chat_id": chat_id_obj,
         "role": role,
         "content": content,
-        "created_at": datetime.now(timezone.utc)
+        "created_at": datetime.now(timezone.utc),
     }
+
+    if sources is not None:
+        doc["sources"] = sources
+    if source_data is not None:
+        doc["source_data"] = source_data
 
     messages_collection.insert_one(doc)
 
     return doc
+
 
 def _get_owned_chat(chat_id: str, user: dict):
     try:

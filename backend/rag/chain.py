@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from backend.llm_model.model import get_llm
 from backend.rag.logging_utils import log_execution_event, log_execution_time
-from backend.rag.loader import get_retriever
+from backend.rag.loader import retrieve_relevant_documents
 
 load_dotenv()
 
@@ -24,7 +24,10 @@ def get_prompt(context, query, history_text=""):
 You are a helpful AI assistant.
 
 Rules:
-- provide the answer based on the provided context
+- Answer only if the provided context contains the actual answer to the question.
+- Do not use outside knowledge.
+- Do not guess or infer an answer that is not directly supported by the context.
+- If the context does not contain the answer, reply exactly: No data found.
 
 Context:
 {context}
@@ -48,27 +51,39 @@ def format_docs(docs):
 
 @log_execution_time("retrieve_documents")
 def retrieve_documents(question: str):
-    retriever = get_retriever()
-    return retriever.invoke(question)
-
-
-@log_execution_time("rerank_documents")
-def rerank_documents(question: str, docs):
-    # Placeholder for future reranking logic. Logging this step now keeps
-    # latency tracing stable when a dedicated reranker is introduced later.
-    return docs
+    return retrieve_relevant_documents(question)
 
 
 @log_execution_time("llm_generation")
 def generate_llm_response(llm, final_prompt):
+    if isinstance(final_prompt, str):
+        return llm.invoke(final_prompt)
+
     return llm.invoke([final_prompt])
 
 
 @log_execution_time("post_process_response")
 def post_process_response(response, docs):
+    source_data = [
+        {
+            "source": doc.metadata.get("source"),
+            "file_name": doc.metadata.get("file_name"),
+            "page": doc.metadata.get("page"),
+            "relevance_score": doc.metadata.get("relevance_score"),
+            "retrieval_reason": doc.metadata.get("retrieval_reason"),
+            "content": doc.page_content,
+        }
+        for doc in docs
+    ]
+
     return {
         "answer": response.content,
-        "sources": [doc.metadata.get("source") for doc in docs],
+        "sources": list(
+            dict.fromkeys(
+                source["source"] for source in source_data if source.get("source")
+            )
+        ),
+        "source_data": source_data,
     }
 
 
@@ -81,12 +96,12 @@ def get_rag_chain():
 
         try:
             docs = retrieve_documents(question)
-            docs = rerank_documents(question, docs)
 
             if not docs:
                 result = {
                     "answer": "No relevant information found.",
                     "sources": [],
+                    "source_data": [],
                 }
                 end_time = datetime.now(timezone.utc).isoformat()
                 duration_ms = (perf_counter() - start_counter) * 1000
@@ -115,6 +130,8 @@ def get_rag_chain():
             )
             return {
                 "answer": "Something went wrong while processing your request.",
+                "sources": [],
+                "source_data": [],
                 "error": str(e),
             }
 

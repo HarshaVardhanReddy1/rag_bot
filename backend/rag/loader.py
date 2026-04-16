@@ -15,6 +15,9 @@ DOCS_DIR = Path("docs")
 VECTOR_DB_DIR = "chroma_db"
 COLLECTION_NAME = "rag_documents"
 SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md"}
+RETRIEVER_TOP_K = 3
+RETRIEVER_FETCH_K = 10
+RELEVANCE_SCORE_THRESHOLD = 0.5
 
 
 def sanitize_text(value: str):
@@ -49,8 +52,8 @@ def get_embeddings():
 
 def get_text_splitter():
     return RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
+        chunk_size=400,
+        chunk_overlap=100,
     )
 
 
@@ -156,5 +159,32 @@ def get_retriever():
     vectorstore = seed_vectorstore_from_docs()
 
     return vectorstore.as_retriever(
-        search_kwargs={"k": 3}
+        search_type="similarity_score_threshold",
+        search_kwargs={
+            "k": RETRIEVER_TOP_K,
+            "score_threshold": RELEVANCE_SCORE_THRESHOLD,
+        },
     )
+
+
+@log_execution_time("retrieve_relevant_documents")
+def retrieve_relevant_documents(question: str):
+    vectorstore = seed_vectorstore_from_docs()
+
+    docs_with_scores = vectorstore.similarity_search_with_relevance_scores(
+        question,
+        k=RETRIEVER_FETCH_K,
+    )
+
+    candidate_docs = []
+
+    for doc, score in docs_with_scores:
+        doc.metadata["relevance_score"] = score
+        doc.metadata["retrieval_reason"] = (
+            f"relevance_score >= {RELEVANCE_SCORE_THRESHOLD}"
+        )
+
+        if score >= RELEVANCE_SCORE_THRESHOLD:
+            candidate_docs.append(doc)
+
+    return candidate_docs[:RETRIEVER_TOP_K]
