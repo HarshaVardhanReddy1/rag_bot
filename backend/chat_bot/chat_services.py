@@ -1,6 +1,8 @@
 import json
+import logging
 import re
 from datetime import datetime, timezone
+from typing import Any
 
 from backend.chat_bot.chat_summarization import summarize_if_needed
 from backend.chat_bot.chat_utils import (
@@ -12,37 +14,127 @@ from backend.database import chats_collection, messages_collection
 from backend.llm_model.model import get_llm
 from backend.rag.chain import generate_llm_response, get_rag_chain
 
+logger = logging.getLogger(__name__)
+
+DEFAULT_CHAT_TITLE = "New Chat"
+MAX_VALIDATION_SOURCE_CHARS = 12000
+DEFAULT_VALIDATION_RESPONSE = {
+    "accuracy": 0,
+    "relevance": 0,
+    "bias": "No",
+    "completeness": 0,
+    "decision": "FLAG",
+}
+
 rag_chain = get_rag_chain()
 
 
-def _format_source_data_for_validation(source_data: list[dict]) -> str:
+def _safe_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _sanitize_sources(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    seen: set[str] = set()
+    cleaned_sources: list[str] = []
+
+    for item in value:
+        source = _safe_text(item)
+        if not source or source in seen:
+            continue
+        seen.add(source)
+        cleaned_sources.append(source)
+
+    return cleaned_sources
+
+
+def _sanitize_source_data(source_data: Any) -> list[dict[str, Any]]:
+    if not isinstance(source_data, list):
+        return []
+
+    cleaned_sources: list[dict[str, Any]] = []
+
+    for item in source_data:
+        if not isinstance(item, dict):
+            continue
+
+        cleaned_source = {
+            "source": _safe_text(item.get("source")) or None,
+            "file_name": _safe_text(item.get("file_name")) or None,
+            "relevance_score": item.get("relevance_score"),
+            "retrieval_reason": _safe_text(item.get("retrieval_reason")) or None,
+            "content": _safe_text(item.get("content")),
+        }
+        cleaned_sources.append(cleaned_source)
+
+    return cleaned_sources
+
+
+def _normalize_result(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        logger.warning("RAG pipeline returned unexpected result type: %s", type(result))
+        return {
+            "answer": "Something went wrong while processing your request.",
+            "sources": [],
+            "source_data": [],
+        }
+
+    answer = _safe_text(result.get("answer"))
+    normalized = {
+        "answer": answer or "No data found.",
+        "sources": _sanitize_sources(result.get("sources")),
+        "source_data": _sanitize_source_data(result.get("source_data")),
+    }
+
+    if result.get("error"):
+        normalized["error"] = _safe_text(result.get("error"))
+
+    return normalized
+
+
+def _format_source_data_for_validation(source_data: list[dict[str, Any]]) -> str:
     if not source_data:
         return "No source data was retrieved."
 
-    formatted_sources = []
+    formatted_sources: list[str] = []
+    total_chars = 0
 
     for index, source in enumerate(source_data, start=1):
         metadata = []
 
-        if source.get("file_name"):
-            metadata.append(f"file_name={source['file_name']}")
-        if source.get("source"):
-            metadata.append(f"source={source['source']}")
-        if source.get("page") is not None:
-            metadata.append(f"page={source['page']}")
-        if source.get("relevance_score") is not None:
-            metadata.append(f"relevance_score={source['relevance_score']:.3f}")
-        if source.get("retrieval_reason"):
-            metadata.append(f"retrieval_reason={source['retrieval_reason']}")
+        file_name = _safe_text(source.get("file_name"))
+        source_path = _safe_text(source.get("source"))
+        retrieval_reason = _safe_text(source.get("retrieval_reason"))
+        relevance_score = source.get("relevance_score")
+
+        if file_name:
+            metadata.append(f"file_name={file_name}")
+        if source_path:
+            metadata.append(f"source={source_path}")
+        if isinstance(relevance_score, (int, float)):
+            metadata.append(f"relevance_score={relevance_score:.3f}")
+        if retrieval_reason:
+            metadata.append(f"retrieval_reason={retrieval_reason}")
 
         metadata_text = ", ".join(metadata) if metadata else "metadata unavailable"
-        content = str(source.get("content") or "").strip()
-        formatted_sources.append(f"Source {index} ({metadata_text}):\n{content}")
+        content = _safe_text(source.get("content"))
+        formatted_source = f"Source {index} ({metadata_text}):\n{content}"
+
+        if total_chars + len(formatted_source) > MAX_VALIDATION_SOURCE_CHARS:
+            remaining_chars = MAX_VALIDATION_SOURCE_CHARS - total_chars
+            if remaining_chars > 0:
+                formatted_sources.append(formatted_source[:remaining_chars].rstrip())
+            break
+
+        formatted_sources.append(formatted_source)
+        total_chars += len(formatted_source)
 
     return "\n\n".join(formatted_sources)
 
 
-def _validation_prompt(query, answer, source_data):
+def _validation_prompt(query: str, answer: str, source_data: list[dict[str, Any]]) -> str:
     source_block = _format_source_data_for_validation(source_data)
 
     return f"""
@@ -84,9 +176,9 @@ Evaluate the response using the following criteria:
 
 CRITICAL RULES:
 - If the response is a safe refusal (e.g., "I can't help with that"):
-  - Accuracy = 10 (correct behavior)
-  - Relevance = 8-10 (addresses intent)
-  - Completeness <= 4 (did not fulfill the request)
+  - Accuracy = 10
+  - Relevance = 8-10
+  - Completeness <= 4
 
 - If the response does NOT directly answer the question:
   - Completeness <= 5
@@ -118,7 +210,7 @@ Format:
 """
 
 
-def _extract_json_object(raw_text: str) -> dict:
+def _extract_json_object(raw_text: str) -> dict[str, Any]:
     if not raw_text:
         raise ValueError("Validator returned an empty response.")
 
@@ -129,10 +221,28 @@ def _extract_json_object(raw_text: str) -> dict:
     elif "{" in cleaned and "}" in cleaned:
         cleaned = cleaned[cleaned.find("{") : cleaned.rfind("}") + 1]
 
-    return json.loads(cleaned)
+    payload = json.loads(cleaned)
+    if not isinstance(payload, dict):
+        raise ValueError("Validator response must be a JSON object.")
+
+    return payload
 
 
-def _normalize_validation(payload: dict) -> dict:
+def _derive_decision(
+    *,
+    accuracy: int,
+    relevance: int,
+    completeness: int,
+    bias: str,
+) -> str:
+    if accuracy < 4 or relevance < 4 or bias == "Yes":
+        return "REJECT"
+    if accuracy >= 8 and relevance >= 8 and completeness >= 8:
+        return "ACCEPT"
+    return "FLAG"
+
+
+def _normalize_validation(payload: dict[str, Any]) -> dict[str, Any]:
     def clamp_score(key: str) -> int:
         value = payload.get(key, 0)
         try:
@@ -140,51 +250,86 @@ def _normalize_validation(payload: dict) -> dict:
         except (TypeError, ValueError):
             return 0
 
-    bias = str(payload.get("bias", "Yes")).strip().title()
-    if bias not in {"Yes", "No"}:
-        bias = "Yes"
+    accuracy = clamp_score("accuracy")
+    relevance = clamp_score("relevance")
+    completeness = clamp_score("completeness")
 
-    decision = str(payload.get("decision", "FLAG")).strip().upper()
+    bias = str(payload.get("bias", "No")).strip().title()
+    if bias not in {"Yes", "No"}:
+        bias = "No"
+
+    decision = str(payload.get("decision", "")).strip().upper()
+    derived_decision = _derive_decision(
+        accuracy=accuracy,
+        relevance=relevance,
+        completeness=completeness,
+        bias=bias,
+    )
     if decision not in {"ACCEPT", "FLAG", "REJECT"}:
-        decision = "FLAG"
+        decision = derived_decision
+    elif decision != derived_decision:
+        logger.warning(
+            "Validator decision %s does not match derived decision %s; using derived value.",
+            decision,
+            derived_decision,
+        )
+        decision = derived_decision
 
     return {
-        "accuracy": clamp_score("accuracy"),
-        "relevance": clamp_score("relevance"),
+        "accuracy": accuracy,
+        "relevance": relevance,
         "bias": bias,
-        "completeness": clamp_score("completeness"),
+        "completeness": completeness,
         "decision": decision,
     }
 
 
-def validate_response(query: str, result: dict):
-    llm = get_llm()
+def validate_response(query: str, result: dict[str, Any]) -> dict[str, Any]:
+    normalized_result = _normalize_result(result)
     prompt = _validation_prompt(
-        query,
-        result["answer"],
-        result.get("source_data", []),
+        _safe_text(query),
+        normalized_result["answer"],
+        normalized_result["source_data"],
     )
-    validation_response = generate_llm_response(llm, prompt)
-    parsed_response = _extract_json_object(validation_response.content)
-    return _normalize_validation(parsed_response)
+
+    try:
+        llm = get_llm()
+        validation_response = generate_llm_response(llm, prompt)
+        raw_content = getattr(validation_response, "content", validation_response)
+        parsed_response = _extract_json_object(_safe_text(raw_content))
+        return _normalize_validation(parsed_response)
+    except Exception:
+        logger.exception("Failed to validate response for query: %s", _safe_text(query))
+        return dict(DEFAULT_VALIDATION_RESPONSE)
 
 
-def get_chat_response(query: str, chat_id: str, user: dict):
+def get_chat_response(query: str, chat_id: str, user: dict[str, Any]) -> dict[str, Any]:
+    normalized_query = _safe_text(query)
+    if not normalized_query:
+        raise ValueError("Query must not be empty.")
+
     chat_doc = _get_owned_chat(chat_id, user)
     chat_id_obj = chat_doc["_id"]
-    summary = chat_doc.get("summary", "")
+    summary = _safe_text(chat_doc.get("summary"))
 
     history_text = _build_history_text(chat_id_obj, summary)
-    send_message("user", query, chat_id_obj)
-    result = rag_chain(query, history_text)
+    send_message("user", normalized_query, chat_id_obj)
+
+    result = _normalize_result(rag_chain(normalized_query, str(user["_id"]), history_text))
+
     send_message(
         "assistant",
         result["answer"],
         chat_id_obj,
-        sources=result.get("sources", []),
-        source_data=result.get("source_data", []),
+        sources=result["sources"],
+        source_data=result["source_data"],
     )
-    summarize_if_needed(chat_id_obj)
+
+    try:
+        summarize_if_needed(chat_id_obj)
+    except Exception:
+        logger.exception("Failed to summarize chat %s", chat_id)
+
     chats_collection.update_one(
         {"_id": chat_id_obj},
         {"$set": {"updated_at": datetime.now(timezone.utc)}},
@@ -193,11 +338,14 @@ def get_chat_response(query: str, chat_id: str, user: dict):
     return result
 
 
-def generate_new_chat(data, user):
+def generate_new_chat(data: Any, user: dict[str, Any]) -> dict[str, str]:
     now = datetime.now(timezone.utc)
+    raw_title = _safe_text(getattr(data, "title", ""))
+    title = raw_title or DEFAULT_CHAT_TITLE
+
     doc = {
         "user_id": str(user["_id"]),
-        "title": data.title.strip(),
+        "title": title,
         "summary": "",
         "created_at": now,
         "updated_at": now,
@@ -207,11 +355,11 @@ def generate_new_chat(data, user):
 
     return {
         "chat_id": str(result.inserted_id),
-        "title": doc["title"],
+        "title": title,
     }
 
 
-def get_chat_list(user):
+def get_chat_list(user: dict[str, Any]) -> list[dict[str, Any]]:
     chats = chats_collection.find(
         {"user_id": str(user["_id"])},
         {"title": 1, "summary": 1, "updated_at": 1},
@@ -220,30 +368,29 @@ def get_chat_list(user):
     return [
         {
             "chat_id": str(chat["_id"]),
-            "title": chat.get("title"),
-            "summary": chat.get("summary"),
+            "title": _safe_text(chat.get("title")),
+            "summary": _safe_text(chat.get("summary")),
             "updated_at": chat.get("updated_at"),
         }
         for chat in chats
     ]
 
 
-def get_chat_messages(chat_id: str, user: dict):
+def get_chat_messages(chat_id: str, user: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     chat_doc = _get_owned_chat(chat_id, user)
-
-    messages = messages_collection.find({"chat_id": chat_doc["_id"]}).sort(
-        "created_at", 1
-    )
+    messages = messages_collection.find(
+        {"chat_id": chat_doc["_id"]}
+    ).sort("created_at", 1)
 
     return {
         "messages": [
             {
-                "role": message["role"],
-                "content": message["content"],
+                "role": _safe_text(message.get("role")),
+                "content": _safe_text(message.get("content")),
                 "image_url": message.get("image_url"),
-                "sources": message.get("sources"),
-                "source_data": message.get("source_data"),
-                "created_at": message["created_at"],
+                "sources": _sanitize_sources(message.get("sources")),
+                "source_data": _sanitize_source_data(message.get("source_data")),
+                "created_at": message.get("created_at"),
             }
             for message in messages
         ]

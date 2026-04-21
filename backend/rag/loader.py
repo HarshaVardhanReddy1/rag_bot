@@ -2,189 +2,129 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_community.retrievers import PineconeHybridSearchRetriever
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from backend.rag.logging_utils import log_execution_time
+from pinecone_text.sparse import BM25Encoder
+
+from backend.rag.pinecone import index
 
 load_dotenv()
 
 DOCS_DIR = Path("docs")
-VECTOR_DB_DIR = "chroma_db"
-COLLECTION_NAME = "rag_documents"
 SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md"}
-RETRIEVER_TOP_K = 3
-RETRIEVER_FETCH_K = 10
-RELEVANCE_SCORE_THRESHOLD = 0.5
+HYBRID_TOP_K = 7
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 200
 
 
-def sanitize_text(value: str):
+embedding_model = HuggingFaceEndpointEmbeddings(
+    repo_id="sentence-transformers/all-MiniLM-L6-v2",
+    huggingfacehub_api_token=os.getenv("HF_API_KEY"),
+)
+
+_default_sparse_encoder: BM25Encoder | None = None
+
+
+def clean_document_text(value: str) -> str:
     if not value:
         return ""
 
-    # Some PDFs extract invalid surrogate code points that fail during UTF-8 encoding.
     cleaned = value.encode("utf-8", errors="ignore").decode("utf-8")
     return cleaned.replace("\x00", "")
 
 
-def sanitize_documents(documents: list[Document]):
-    sanitized = []
-
-    for document in documents:
-        sanitized.append(
-            Document(
-                page_content=sanitize_text(document.page_content),
-                metadata=dict(document.metadata),
-            )
+def clean_documents(documents: list[Document]) -> list[Document]:
+    return [
+        Document(
+            page_content=clean_document_text(doc.page_content),
+            metadata=dict(doc.metadata),
         )
-
-    return sanitized
-
-
-def get_embeddings():
-    return HuggingFaceEndpointEmbeddings(
-        repo_id="sentence-transformers/all-MiniLM-L6-v2",
-        huggingfacehub_api_token=os.getenv("HF_API_KEY"),
-    )
+        for doc in documents
+    ]
 
 
-def get_text_splitter():
+def create_text_splitter() -> RecursiveCharacterTextSplitter:
     return RecursiveCharacterTextSplitter(
-        chunk_size=400,
-        chunk_overlap=100,
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
     )
 
 
-def is_supported_document(file_path: Path):
-    return file_path.suffix.lower() in SUPPORTED_EXTENSIONS
-
-
-@log_execution_time("load_document")
-def load_document(file_path: Path):
+def load_file_as_document(file_path: Path) -> Document:
     suffix = file_path.suffix.lower()
-
     if suffix == ".pdf":
         loader = PyPDFLoader(str(file_path))
     elif suffix in {".txt", ".md"}:
         loader = TextLoader(str(file_path), encoding="utf-8")
     else:
         raise ValueError(
-            f"Unsupported file type '{suffix}'. Supported types: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+            f"Unsupported file type '{suffix}'. Allowed: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
         )
 
-    documents = sanitize_documents(loader.load())
+    docs = clean_documents(loader.load())
 
-    for document in documents:
-        document.metadata["source"] = str(file_path)
-        document.metadata["file_name"] = file_path.name
-
-    return documents
-
-
-@log_execution_time("load_documents")
-def load_documents(path: Path):
-    documents = []
-
-    if not path.exists():
-        return documents
-
-    for file_path in path.iterdir():
-        if file_path.is_file() and is_supported_document(file_path):
-            documents.extend(load_document(file_path))
-
-    return documents
-
-
-def get_vectorstore():
-    embeddings = get_embeddings()
-    DOCS_DIR.mkdir(parents=True, exist_ok=True)
-
-    return Chroma(
-        collection_name=COLLECTION_NAME,
-        persist_directory=VECTOR_DB_DIR,
-        embedding_function=embeddings,
+    return Document(
+        page_content="\n".join(d.page_content for d in docs),
+        metadata={"source": str(file_path), "file_name": file_path.name},
     )
 
 
-@log_execution_time("split_documents")
-def split_documents(documents):
-    if not documents:
-        return []
-
-    splitter = get_text_splitter()
-    return sanitize_documents(splitter.split_documents(documents))
+def split_document_into_chunks(document: Document) -> list[Document]:
+    return create_text_splitter().split_documents([document])
 
 
-@log_execution_time("seed_vectorstore_from_docs")
-def seed_vectorstore_from_docs():
-    vectorstore = get_vectorstore()
+def get_sparse_encoder() -> BM25Encoder:
+    global _default_sparse_encoder
 
-    if os.path.exists(VECTOR_DB_DIR) and vectorstore._collection.count() > 0:
-        return vectorstore
+    if _default_sparse_encoder is None:
+        _default_sparse_encoder = BM25Encoder.default()
 
-    documents = load_documents(DOCS_DIR)
-    chunks = split_documents(documents)
-
-    if chunks:
-        vectorstore.add_documents(chunks)
-
-    return vectorstore
+    return _default_sparse_encoder
 
 
-@log_execution_time("ingest_file")
-def ingest_file(file_path: Path, uploaded_by=None):
-    documents = load_document(file_path)
+def create_hybrid_retriever() -> PineconeHybridSearchRetriever:
+    return PineconeHybridSearchRetriever(
+        embeddings=embedding_model,
+        sparse_encoder=get_sparse_encoder(),
+        index=index,
+        top_k=HYBRID_TOP_K,
+    )
 
-    for document in documents:
-        if uploaded_by:
-            document.metadata["uploaded_by"] = str(uploaded_by)
 
-    chunks = split_documents(documents)
-    vectorstore = get_vectorstore()
+def ingest_uploaded_file(file_path: Path, uploaded_by=None):
+    doc = load_file_as_document(file_path)
 
-    if chunks:
-        vectorstore.add_documents(chunks)
+    if uploaded_by:
+        doc.metadata["uploaded_by"] = str(uploaded_by)
+
+    chunks = split_document_into_chunks(doc)
+    texts = [chunk.page_content for chunk in chunks]
+    retriever = create_hybrid_retriever()
+
+    retriever.add_texts(
+        texts,
+        metadatas=[
+            {
+                "file_name": chunk.metadata.get("file_name"),
+                "source": chunk.metadata.get("source"),
+                "user_id": str(uploaded_by),
+            }
+            for chunk in chunks
+        ],
+    )
 
     return {
-        "documents_added": len(documents),
-        "chunks_added": len(chunks),
         "file_name": file_path.name,
         "source": str(file_path),
     }
 
 
-def get_retriever():
-    vectorstore = seed_vectorstore_from_docs()
-
-    return vectorstore.as_retriever(
-        search_type="similarity_score_threshold",
-        search_kwargs={
-            "k": RETRIEVER_TOP_K,
-            "score_threshold": RELEVANCE_SCORE_THRESHOLD,
-        },
+def retrieve_relevant_docs(query: str, user_id: str):
+    retriever = create_hybrid_retriever()
+    return retriever.invoke(
+        query,
+        filter={"user_id": str(user_id)},
     )
-
-
-@log_execution_time("retrieve_relevant_documents")
-def retrieve_relevant_documents(question: str):
-    vectorstore = seed_vectorstore_from_docs()
-
-    docs_with_scores = vectorstore.similarity_search_with_relevance_scores(
-        question,
-        k=RETRIEVER_FETCH_K,
-    )
-
-    candidate_docs = []
-
-    for doc, score in docs_with_scores:
-        doc.metadata["relevance_score"] = score
-        doc.metadata["retrieval_reason"] = (
-            f"relevance_score >= {RELEVANCE_SCORE_THRESHOLD}"
-        )
-
-        if score >= RELEVANCE_SCORE_THRESHOLD:
-            candidate_docs.append(doc)
-
-    return candidate_docs[:RETRIEVER_TOP_K]
