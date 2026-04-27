@@ -17,9 +17,9 @@ def build_rag_prompt(
 Conversation history:
 {history_text}
 
-Use conversation history only to understand follow-up questions or references like
-"it", "that", or "the previous answer". Do not use conversation history as factual
-evidence. The document context below is the only source of truth.
+Use conversation history only to understand follow-up references like "it" or
+"that". Do not use conversation history as factual evidence. The retrieved
+document content below is the only source of truth.
 """
 
     return HumanMessage(
@@ -27,41 +27,54 @@ evidence. The document context below is the only source of truth.
             {
                 "type": "text",
                 "text": f"""
-You are a precise RAG assistant that answers from uploaded documents.
+You are a helpful and precise assistant.
 
 Primary rule:
-Answer the user's question using only the document context provided below.
+Answer the user's question using only the retrieved document content below.
+Do not use outside knowledge.
+If the document content does not contain enough relevant information, reply
+exactly: {NO_DATA_FOUND_ANSWER}
 
 Answering rules:
-- Start with the direct answer. Then add only the details needed to support it.
-- Combine information across chunks when they clearly discuss the same topic.
-- Preserve exact project names, methods, results, numbers, dates, tools, and technical terms.
-- If the user asks "what is abstract", "abstract", or asks for another section title, treat it as a request to summarize or provide that section from the uploaded document.
-- Do not use outside knowledge.
-- If the document has no relevant info, reply exactly: {NO_DATA_FOUND_ANSWER}
+- Start with the direct answer.
+- Use the retrieved document content silently as internal grounding.
+- Do not mention the document, source, file, context, excerpt, or where the
+  information came from unless the user explicitly asks for citations or
+  references.
+- Do not say phrases like "according to the document", "from the source",
+  "this information came from", or "based on the provided context".
+- If the user asks for an explanation, comparison, or concept, explain it
+  clearly in simple language.
+- When helpful, include a short example.
+- Combine information across excerpts only when they clearly support the same
+  point.
+- Preserve exact technical terms, names, numbers, methods, and results from
+  the document content.
+- Do not invent facts or unsupported details.
 
 Style:
-- Keep answers concise and specific.
+- Be clear, natural, and easy to understand.
+- Sound like a normal assistant, not like a document reader.
+- Keep the answer concise, but complete enough to be useful.
 
-Retrieved document context:
+Retrieved document content:
 {context}
+
 {history_block}
 
 User question:
 {query}
 
 Answer:
-""",
+"""
             }
         ]
     )
-
 
 # Convert retrieved documents into one readable context block for the model.
 @traceable(name="rag_context_formatting")
 def format_docs(documents) -> str:
     formatted_docs = []
-    for index, document in enumerate(documents, start=1):
-        file_name = document.metadata.get("file_name") or "unknown source"
-        formatted_docs.append(f"[Source {index}: {file_name}]\n{document.page_content}")
+    for document in documents:
+        formatted_docs.append(document.page_content)
     return "\n\n".join(formatted_docs)

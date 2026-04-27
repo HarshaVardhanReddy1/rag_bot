@@ -39,6 +39,7 @@ while not pc.describe_index(index_name).status["ready"]:
 
 index = pc.Index(index_name)
 _default_sparse_encoder: BM25Encoder | None = None
+_default_hybrid_retriever: PineconeHybridSearchRetriever | None = None
 
 
 # Reuse one BM25 encoder instance so hybrid retrieval stays fast and consistent.
@@ -51,12 +52,17 @@ def get_sparse_encoder() -> BM25Encoder:
     return _default_sparse_encoder
 
 
-# Build the Pinecone hybrid retriever used for both ingestion and search.
+# Reuse one retriever wrapper so we do not rebuild the same object on every call.
 def create_hybrid_retriever() -> PineconeHybridSearchRetriever:
-    return PineconeHybridSearchRetriever(
-        embeddings=embedding_model,
-        sparse_encoder=get_sparse_encoder(),
-        index=index,
-        alpha=HYBRID_ALPHA,
-        top_k=HYBRID_TOP_K,
-    )
+    global _default_hybrid_retriever
+
+    if _default_hybrid_retriever is None:
+        _default_hybrid_retriever = PineconeHybridSearchRetriever(
+            embeddings=embedding_model,
+            sparse_encoder=get_sparse_encoder(),
+            index=index,
+            alpha=HYBRID_ALPHA,
+            top_k=HYBRID_TOP_K,
+        )
+
+    return _default_hybrid_retriever

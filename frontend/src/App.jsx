@@ -157,10 +157,13 @@ function App() {
   }, []);
 
   const loadChats = useCallback(
-    async (preferredChatId) => {
+    async (preferredChatId, options = {}) => {
       if (!token) return;
+      const { background = false } = options;
 
-      setIsChatsLoading(true);
+      if (!background) {
+        setIsChatsLoading(true);
+      }
       try {
         const data = await apiRequest("/chatList", {
           headers: { Authorization: `Bearer ${token}` },
@@ -185,17 +188,22 @@ function App() {
       } catch (error) {
         showFlash("error", error.message);
       } finally {
-        setIsChatsLoading(false);
+        if (!background) {
+          setIsChatsLoading(false);
+        }
       }
     },
     [selectedChatId, showFlash, token],
   );
 
   const loadMessages = useCallback(
-    async (chatId) => {
+    async (chatId, options = {}) => {
       if (!token || !chatId) return;
+      const { background = false } = options;
 
-      setIsMessagesLoading(true);
+      if (!background) {
+        setIsMessagesLoading(true);
+      }
       try {
         const data = await apiRequest(`/chat/${chatId}/messages`, {
           headers: { Authorization: `Bearer ${token}` },
@@ -211,7 +219,9 @@ function App() {
       } catch (error) {
         showFlash("error", error.message);
       } finally {
-        setIsMessagesLoading(false);
+        if (!background) {
+          setIsMessagesLoading(false);
+        }
       }
     },
     [showFlash, token],
@@ -368,7 +378,10 @@ function App() {
 
         setDocumentFile(null);
         setUploadInputKey((current) => current + 1);
-        await Promise.all([loadMessages(selectedChatId), loadChats(selectedChatId)]);
+        await Promise.all([
+          loadMessages(selectedChatId, { background: true }),
+          loadChats(selectedChatId, { background: true }),
+        ]);
       } catch (error) {
         setChatValidation((current) => ({
           ...current,

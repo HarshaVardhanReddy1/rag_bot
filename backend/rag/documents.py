@@ -6,6 +6,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from backend.rag.config import CHUNK_OVERLAP, CHUNK_SIZE, SUPPORTED_EXTENSIONS
 
+_text_splitter: RecursiveCharacterTextSplitter | None = None
+
 
 # Remove invalid bytes and null characters so downstream tools receive clean text.
 def clean_document_text(value: str) -> str:
@@ -16,23 +18,17 @@ def clean_document_text(value: str) -> str:
     return cleaned.replace("\x00", "")
 
 
-# Rebuild documents with cleaned text while keeping their metadata intact.
-def clean_documents(documents: list[Document]) -> list[Document]:
-    return [
-        Document(
-            page_content=clean_document_text(doc.page_content),
-            metadata=dict(doc.metadata),
-        )
-        for doc in documents
-    ]
-
-
 # Create the text splitter used to break uploaded files into retrieval-sized chunks.
 def create_text_splitter() -> RecursiveCharacterTextSplitter:
-    return RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-    )
+    global _text_splitter
+
+    if _text_splitter is None:
+        _text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=CHUNK_SIZE,
+            chunk_overlap=CHUNK_OVERLAP,
+        )
+
+    return _text_splitter
 
 
 # Load one supported file into a single normalized document for ingestion.
@@ -47,9 +43,9 @@ def load_file_as_document(file_path: Path) -> Document:
             f"Unsupported file type '{suffix}'. Allowed: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
         )
 
-    docs = clean_documents(loader.load())
+    docs = loader.load()
     return Document(
-        page_content="\n".join(d.page_content for d in docs),
+        page_content="\n".join(clean_document_text(d.page_content) for d in docs),
         metadata={"source": str(file_path), "file_name": file_path.name},
     )
 

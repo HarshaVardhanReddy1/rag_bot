@@ -8,6 +8,13 @@ from backend.database import users_collection
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
+def _build_safe_user_context(user: dict) -> dict:
+    return {
+        "_id": str(user["_id"]),
+        "role": str(user.get("role", "user")),
+    }
+
+
 def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     payload = decode_access_token(token)
     if not payload:
@@ -38,4 +45,4 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
             detail="User not found",
         )
 
-    return user
+    return _build_safe_user_context(user)

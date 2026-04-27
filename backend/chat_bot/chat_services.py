@@ -65,8 +65,16 @@ def _sanitize_source_data(source_data: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
 
+        chunk_index = item.get("chunk_index")
+        try:
+            normalized_chunk_index = int(chunk_index)
+        except (TypeError, ValueError):
+            normalized_chunk_index = None
+
         sanitized_source_data.append(
             {
+                "chunk_id": _safe_text(item.get("chunk_id")) or None,
+                "chunk_index": normalized_chunk_index,
                 "source": _safe_text(item.get("source")) or None,
                 "file_name": _safe_text(item.get("file_name")) or None,
                 "relevance_score": item.get("relevance_score"),
@@ -333,23 +341,30 @@ def _record_langsmith_feedback(validation: dict[str, Any]) -> None:
         pass
 
 
-@traceable(name="response_validation")
-# Run a second-pass validation over the answer using the retrieved sources.
-def validate_response(query: str, normalized_result: dict[str, Any]) -> dict[str, Any]:
-    prompt = _validation_prompt(
-        _safe_text(query),
-        normalized_result["answer"],
-        normalized_result["source_data"],
-    )
+def get_validation_chain():
+    llm = get_llm()
 
-    try:
-        llm = get_llm()
-        validation_response = generate_llm_response(llm, prompt)
-        raw_content = getattr(validation_response, "content", validation_response)
-        parsed_response = _extract_json_object(_safe_text(raw_content))
-        return _normalize_validation(parsed_response)
-    except Exception:
-        return dict(DEFAULT_VALIDATION_RESPONSE)
+    # Reuse the validator model client instead of recreating it for every request.
+    @traceable(name="response_validation")
+    def validate_response(query: str, normalized_result: dict[str, Any]) -> dict[str, Any]:
+        prompt = _validation_prompt(
+            _safe_text(query),
+            normalized_result["answer"],
+            normalized_result["source_data"],
+        )
+
+        try:
+            validation_response = generate_llm_response(llm, prompt)
+            raw_content = getattr(validation_response, "content", validation_response)
+            parsed_response = _extract_json_object(_safe_text(raw_content))
+            return _normalize_validation(parsed_response)
+        except Exception:
+            return dict(DEFAULT_VALIDATION_RESPONSE)
+
+    return validate_response
+
+
+validate_response = get_validation_chain()
 
 
 @traceable
