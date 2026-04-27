@@ -1,23 +1,23 @@
 import json
-import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
 
+from dotenv import load_dotenv
+from langsmith import Client, traceable
+from langsmith.run_helpers import get_current_run_tree
+
 from backend.chat_bot.chat_summarization import summarize_if_needed
-from backend.chat_bot.chat_utils import (
-    _build_history_text,
-    _get_owned_chat,
-    send_message,
-)
+from backend.chat_bot.chat_utils import _build_history_text, _get_owned_chat, send_message
 from backend.database import chats_collection, messages_collection
 from backend.llm_model.model import get_llm
 from backend.rag.chain import generate_llm_response, get_rag_chain
 
-logger = logging.getLogger(__name__)
-
 DEFAULT_CHAT_TITLE = "New Chat"
+DEFAULT_ANSWER = "No data found."
+GENERIC_ERROR_ANSWER = "Something went wrong while processing your request."
 MAX_VALIDATION_SOURCE_CHARS = 12000
+VALIDATION_DECISIONS = {"ACCEPT", "FLAG", "REJECT"}
 DEFAULT_VALIDATION_RESPONSE = {
     "accuracy": 0,
     "relevance": 0,
@@ -26,7 +26,10 @@ DEFAULT_VALIDATION_RESPONSE = {
     "decision": "FLAG",
 }
 
+load_dotenv()
+
 rag_chain = get_rag_chain()
+langsmith_client = Client()
 
 
 def _safe_text(value: Any) -> str:
@@ -37,61 +40,57 @@ def _sanitize_sources(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
 
-    seen: set[str] = set()
-    cleaned_sources: list[str] = []
-
+    seen_sources: set[str] = set()
+    sanitized_sources: list[str] = []
     for item in value:
         source = _safe_text(item)
-        if not source or source in seen:
+        if not source or source in seen_sources:
             continue
-        seen.add(source)
-        cleaned_sources.append(source)
+        seen_sources.add(source)
+        sanitized_sources.append(source)
 
-    return cleaned_sources
+    return sanitized_sources
 
 
 def _sanitize_source_data(source_data: Any) -> list[dict[str, Any]]:
     if not isinstance(source_data, list):
         return []
 
-    cleaned_sources: list[dict[str, Any]] = []
-
+    sanitized_source_data: list[dict[str, Any]] = []
     for item in source_data:
         if not isinstance(item, dict):
             continue
 
-        cleaned_source = {
-            "source": _safe_text(item.get("source")) or None,
-            "file_name": _safe_text(item.get("file_name")) or None,
-            "relevance_score": item.get("relevance_score"),
-            "retrieval_reason": _safe_text(item.get("retrieval_reason")) or None,
-            "content": _safe_text(item.get("content")),
-        }
-        cleaned_sources.append(cleaned_source)
+        sanitized_source_data.append(
+            {
+                "source": _safe_text(item.get("source")) or None,
+                "file_name": _safe_text(item.get("file_name")) or None,
+                "relevance_score": item.get("relevance_score"),
+                "content": _safe_text(item.get("content")),
+            }
+        )
 
-    return cleaned_sources
+    return sanitized_source_data
 
 
 def _normalize_result(result: Any) -> dict[str, Any]:
     if not isinstance(result, dict):
-        logger.warning("RAG pipeline returned unexpected result type: %s", type(result))
         return {
-            "answer": "Something went wrong while processing your request.",
+            "answer": GENERIC_ERROR_ANSWER,
             "sources": [],
             "source_data": [],
         }
 
-    answer = _safe_text(result.get("answer"))
-    normalized = {
-        "answer": answer or "No data found.",
+    normalized_result = {
+        "answer": _safe_text(result.get("answer")) or DEFAULT_ANSWER,
         "sources": _sanitize_sources(result.get("sources")),
         "source_data": _sanitize_source_data(result.get("source_data")),
     }
 
     if result.get("error"):
-        normalized["error"] = _safe_text(result.get("error"))
+        normalized_result["error"] = _safe_text(result.get("error"))
 
-    return normalized
+    return normalized_result
 
 
 def _format_source_data_for_validation(source_data: list[dict[str, Any]]) -> str:
@@ -102,11 +101,10 @@ def _format_source_data_for_validation(source_data: list[dict[str, Any]]) -> str
     total_chars = 0
 
     for index, source in enumerate(source_data, start=1):
-        metadata = []
+        metadata: list[str] = []
 
         file_name = _safe_text(source.get("file_name"))
         source_path = _safe_text(source.get("source"))
-        retrieval_reason = _safe_text(source.get("retrieval_reason"))
         relevance_score = source.get("relevance_score")
 
         if file_name:
@@ -115,8 +113,6 @@ def _format_source_data_for_validation(source_data: list[dict[str, Any]]) -> str
             metadata.append(f"source={source_path}")
         if isinstance(relevance_score, (int, float)):
             metadata.append(f"relevance_score={relevance_score:.3f}")
-        if retrieval_reason:
-            metadata.append(f"retrieval_reason={retrieval_reason}")
 
         metadata_text = ", ".join(metadata) if metadata else "metadata unavailable"
         content = _safe_text(source.get("content"))
@@ -265,14 +261,9 @@ def _normalize_validation(payload: dict[str, Any]) -> dict[str, Any]:
         completeness=completeness,
         bias=bias,
     )
-    if decision not in {"ACCEPT", "FLAG", "REJECT"}:
+    if decision not in VALIDATION_DECISIONS:
         decision = derived_decision
     elif decision != derived_decision:
-        logger.warning(
-            "Validator decision %s does not match derived decision %s; using derived value.",
-            decision,
-            derived_decision,
-        )
         decision = derived_decision
 
     return {
@@ -284,8 +275,54 @@ def _normalize_validation(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validate_response(query: str, result: dict[str, Any]) -> dict[str, Any]:
-    normalized_result = _normalize_result(result)
+def build_validation_metrics(validation: dict[str, Any]) -> dict[str, Any]:
+    confidence = round(
+        (
+            validation["accuracy"]
+            + validation["relevance"]
+            + validation["completeness"]
+        )
+        / 3,
+        2,
+    )
+    return {
+        "accuracy": validation["accuracy"],
+        "bias": validation["bias"],
+        "completeness": validation["completeness"],
+        "relevance": validation["relevance"],
+        "confidence": confidence,
+        "decision": validation["decision"],
+    }
+
+
+def _record_langsmith_feedback(validation: dict[str, Any]) -> None:
+    try:
+        current_run = get_current_run_tree()
+        if current_run is None:
+            return
+
+        feedback_items = (
+            ("accuracy", validation["accuracy"], validation["accuracy"]),
+            ("relevance", validation["relevance"], validation["relevance"]),
+            ("completeness", validation["completeness"], validation["completeness"]),
+            ("bias", None, validation["bias"]),
+            ("decision", None, validation["decision"]),
+        )
+
+        for key, score, value in feedback_items:
+            langsmith_client.create_feedback(
+                run_id=current_run.id,
+                trace_id=current_run.trace_id,
+                key=key,
+                score=score,
+                value=value,
+            )
+    except Exception:
+        logger.exception("Failed to write validation feedback to LangSmith.")
+
+
+@traceable(name="response_validation")
+def validate_response(query: str, normalized_result: dict[str, Any]) -> dict[str, Any]:
     prompt = _validation_prompt(
         _safe_text(query),
         normalized_result["answer"],
@@ -299,10 +336,10 @@ def validate_response(query: str, result: dict[str, Any]) -> dict[str, Any]:
         parsed_response = _extract_json_object(_safe_text(raw_content))
         return _normalize_validation(parsed_response)
     except Exception:
-        logger.exception("Failed to validate response for query: %s", _safe_text(query))
         return dict(DEFAULT_VALIDATION_RESPONSE)
 
 
+@traceable
 def get_chat_response(query: str, chat_id: str, user: dict[str, Any]) -> dict[str, Any]:
     normalized_query = _safe_text(query)
     if not normalized_query:
@@ -311,47 +348,50 @@ def get_chat_response(query: str, chat_id: str, user: dict[str, Any]) -> dict[st
     chat_doc = _get_owned_chat(chat_id, user)
     chat_id_obj = chat_doc["_id"]
     summary = _safe_text(chat_doc.get("summary"))
-
     history_text = _build_history_text(chat_id_obj, summary)
+
     send_message("user", normalized_query, chat_id_obj)
 
-    result = _normalize_result(rag_chain(normalized_query, str(user["_id"]), history_text))
+    normalized_result = _normalize_result(
+        rag_chain(normalized_query, str(user["_id"]), history_text)
+    )
+    validation = validate_response(normalized_query, normalized_result)
+    _record_langsmith_feedback(validation)
+    normalized_result["metrics"] = build_validation_metrics(validation)
 
     send_message(
         "assistant",
-        result["answer"],
+        normalized_result["answer"],
         chat_id_obj,
-        sources=result["sources"],
-        source_data=result["source_data"],
+        sources=normalized_result["sources"],
+        source_data=normalized_result["source_data"],
     )
 
     try:
         summarize_if_needed(chat_id_obj)
     except Exception:
-        logger.exception("Failed to summarize chat %s", chat_id)
+        pass
 
     chats_collection.update_one(
         {"_id": chat_id_obj},
         {"$set": {"updated_at": datetime.now(timezone.utc)}},
     )
 
-    return result
+    return normalized_result
 
 
 def generate_new_chat(data: Any, user: dict[str, Any]) -> dict[str, str]:
     now = datetime.now(timezone.utc)
-    raw_title = _safe_text(getattr(data, "title", ""))
-    title = raw_title or DEFAULT_CHAT_TITLE
+    title = _safe_text(getattr(data, "title", "")) or DEFAULT_CHAT_TITLE
 
-    doc = {
+    chat_doc = {
         "user_id": str(user["_id"]),
         "title": title,
         "summary": "",
         "created_at": now,
         "updated_at": now,
     }
-
-    result = chats_collection.insert_one(doc)
+    result = chats_collection.insert_one(chat_doc)
 
     return {
         "chat_id": str(result.inserted_id),
@@ -378,9 +418,10 @@ def get_chat_list(user: dict[str, Any]) -> list[dict[str, Any]]:
 
 def get_chat_messages(chat_id: str, user: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     chat_doc = _get_owned_chat(chat_id, user)
-    messages = messages_collection.find(
-        {"chat_id": chat_doc["_id"]}
-    ).sort("created_at", 1)
+    messages = messages_collection.find({"chat_id": chat_doc["_id"]}).sort(
+        "created_at",
+        1,
+    )
 
     return {
         "messages": [

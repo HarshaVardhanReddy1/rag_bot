@@ -15,9 +15,10 @@ load_dotenv()
 
 DOCS_DIR = Path("docs")
 SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md"}
-HYBRID_TOP_K = 7
-CHUNK_SIZE = 800
-CHUNK_OVERLAP = 200
+HYBRID_TOP_K = 5
+HYBRID_ALPHA = 0.5
+CHUNK_SIZE = 400
+CHUNK_OVERLAP = 100
 
 
 embedding_model = HuggingFaceEndpointEmbeddings(
@@ -44,6 +45,30 @@ def clean_documents(documents: list[Document]) -> list[Document]:
         )
         for doc in documents
     ]
+
+
+def _enrich_retrieved_documents(documents: list[Document]) -> list[Document]:
+    enriched_documents: list[Document] = []
+
+    for document in documents:
+        metadata = dict(document.metadata)
+        score = metadata.get("relevance_score")
+
+        if score is None:
+            score = metadata.get("score")
+
+        metadata["relevance_score"] = (
+            float(score) if isinstance(score, (int, float)) else None
+        )
+
+        enriched_documents.append(
+            Document(
+                page_content=document.page_content,
+                metadata=metadata,
+            )
+        )
+
+    return enriched_documents
 
 
 def create_text_splitter() -> RecursiveCharacterTextSplitter:
@@ -90,6 +115,7 @@ def create_hybrid_retriever() -> PineconeHybridSearchRetriever:
         embeddings=embedding_model,
         sparse_encoder=get_sparse_encoder(),
         index=index,
+        alpha=HYBRID_ALPHA,
         top_k=HYBRID_TOP_K,
     )
 
@@ -124,7 +150,8 @@ def ingest_uploaded_file(file_path: Path, uploaded_by=None):
 
 def retrieve_relevant_docs(query: str, user_id: str):
     retriever = create_hybrid_retriever()
-    return retriever.invoke(
+    documents = retriever.invoke(
         query,
         filter={"user_id": str(user_id)},
     )
+    return _enrich_retrieved_documents(documents)

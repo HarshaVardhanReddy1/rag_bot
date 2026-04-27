@@ -1,8 +1,12 @@
 from pymongo import DESCENDING, MongoClient
+
 from backend.settings import settings
 
-client = MongoClient(settings.MONGO_URL or "mongodb://localhost:27017/")
-db = client["rag_bot_db"]
+DEFAULT_MONGO_URL = "mongodb://localhost:27017/"
+DATABASE_NAME = "rag_bot_db"
+
+client = MongoClient(settings.MONGO_URL or DEFAULT_MONGO_URL)
+db = client[DATABASE_NAME]
 
 users_collection = db["users"]
 chats_collection = db["chats"]

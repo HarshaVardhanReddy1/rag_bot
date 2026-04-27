@@ -1,8 +1,8 @@
-from fastapi import APIRouter, status,Depends
-
-from backend.authentication.schemas import RegisterSchema, LoginSchema
-from backend.authentication.services import register_user, user_login
+from fastapi import APIRouter, Depends, status
 from fastapi.security import OAuth2PasswordRequestForm
+
+from backend.authentication.schemas import RegisterSchema
+from backend.authentication.services import register_user, user_login
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -13,5 +13,5 @@ async def register(data: RegisterSchema):
 
 
 @router.post("/login")
-async def login(data:OAuth2PasswordRequestForm = Depends() ):
+async def login(data: OAuth2PasswordRequestForm = Depends()):
     return user_login(data)

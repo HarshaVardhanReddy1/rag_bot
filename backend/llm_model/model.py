@@ -1,13 +1,18 @@
-from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
-from backend.settings import settings
-from dotenv import load_dotenv
 import os
+
+from dotenv import load_dotenv
+from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+
 load_dotenv()
 
-def get_llm():
-    llm = HuggingFaceEndpoint(
-        repo_id="meta-llama/Llama-3.1-8B-Instruct",
+DEFAULT_LLM_REPO_ID = "meta-llama/Llama-3.1-8B-Instruct"
+DEFAULT_TEMPERATURE = 0.3
+
+
+def get_llm() -> ChatHuggingFace:
+    endpoint = HuggingFaceEndpoint(
+        repo_id=DEFAULT_LLM_REPO_ID,
         huggingfacehub_api_token=os.getenv("HF_API_KEY"),
-        temperature=0.3
+        temperature=DEFAULT_TEMPERATURE,
     )
-    return ChatHuggingFace(llm=llm)
+    return ChatHuggingFace(llm=endpoint)
