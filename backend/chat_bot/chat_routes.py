@@ -14,12 +14,13 @@ from backend.chat_bot.chat_utils import _get_owned_chat, send_message
 from backend.chat_bot.schemas import NewChatRequest
 from backend.database import chats_collection
 from backend.dependencies import get_current_user
-from backend.rag.loader import DOCS_DIR, SUPPORTED_EXTENSIONS, ingest_uploaded_file
+from backend.rag import DOCS_DIR, SUPPORTED_EXTENSIONS, ingest_uploaded_file
 
 router = APIRouter()
 UPLOADS_DIR = DOCS_DIR / "uploads"
 
 
+# Save an uploaded file locally and ingest it into the user's RAG index.
 async def _save_and_ingest_upload(file: UploadFile, user_id: str) -> dict:
     suffix = Path(file.filename).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
@@ -42,6 +43,7 @@ async def _save_and_ingest_upload(file: UploadFile, user_id: str) -> dict:
         await file.close()
 
 
+# Return the chat payload used when the request only uploads a document.
 def _build_upload_only_response(chat_id_obj, upload_result: dict) -> dict:
     send_message(
         "user",
@@ -71,6 +73,7 @@ def _build_upload_only_response(chat_id_obj, upload_result: dict) -> dict:
 
 
 @router.post("/chat")
+# Handle a chat request that may include both a message and a document upload.
 async def chat(
     chat_id: str = Form(...),
     query: str = Form(""),
@@ -105,20 +108,24 @@ async def chat(
 
 
 @router.post("/newChat")
+# Create a new empty chat session for the current user.
 async def new_chat(data: NewChatRequest, user: dict = Depends(get_current_user)):
     return generate_new_chat(data, user)
 
 
 @router.get("/chatList")
+# List the user's chats in most recently updated order.
 async def list_chat_items(user: dict = Depends(get_current_user)):
     return get_chat_list(user)
 
 
 @router.get("/chat/{chat_id}/messages")
+# Return the full message history for one chat the user owns.
 async def list_chat_messages(chat_id: str, user: dict = Depends(get_current_user)):
     return get_chat_messages(chat_id, user)
 
 
 @router.post("/logout")
+# Keep a simple logout endpoint for the frontend flow.
 def logout():
     return {"message": "Logged out successfully"}

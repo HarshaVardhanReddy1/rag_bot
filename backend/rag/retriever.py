@@ -2,7 +2,11 @@ import os
 import time
 
 from dotenv import load_dotenv
+from langchain_community.retrievers import PineconeHybridSearchRetriever
 from pinecone import Pinecone, ServerlessSpec
+from pinecone_text.sparse import BM25Encoder
+
+from backend.rag.config import HYBRID_ALPHA, HYBRID_TOP_K, embedding_model
 
 load_dotenv()
 
@@ -34,3 +38,25 @@ while not pc.describe_index(index_name).status["ready"]:
     time.sleep(1)
 
 index = pc.Index(index_name)
+_default_sparse_encoder: BM25Encoder | None = None
+
+
+# Reuse one BM25 encoder instance so hybrid retrieval stays fast and consistent.
+def get_sparse_encoder() -> BM25Encoder:
+    global _default_sparse_encoder
+
+    if _default_sparse_encoder is None:
+        _default_sparse_encoder = BM25Encoder.default()
+
+    return _default_sparse_encoder
+
+
+# Build the Pinecone hybrid retriever used for both ingestion and search.
+def create_hybrid_retriever() -> PineconeHybridSearchRetriever:
+    return PineconeHybridSearchRetriever(
+        embeddings=embedding_model,
+        sparse_encoder=get_sparse_encoder(),
+        index=index,
+        alpha=HYBRID_ALPHA,
+        top_k=HYBRID_TOP_K,
+    )

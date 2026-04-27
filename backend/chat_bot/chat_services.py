@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -11,7 +12,8 @@ from backend.chat_bot.chat_summarization import summarize_if_needed
 from backend.chat_bot.chat_utils import _build_history_text, _get_owned_chat, send_message
 from backend.database import chats_collection, messages_collection
 from backend.llm_model.model import get_llm
-from backend.rag.chain import generate_llm_response, get_rag_chain
+from backend.rag import get_rag_chain
+from backend.rag.pipeline import generate_llm_response
 
 DEFAULT_CHAT_TITLE = "New Chat"
 DEFAULT_ANSWER = "No data found."
@@ -30,12 +32,15 @@ load_dotenv()
 
 rag_chain = get_rag_chain()
 langsmith_client = Client()
+logger = logging.getLogger(__name__)
 
 
+# Normalize any incoming value into a trimmed string.
 def _safe_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+# Deduplicate and clean source paths before they are returned to the client.
 def _sanitize_sources(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -52,6 +57,7 @@ def _sanitize_sources(value: Any) -> list[str]:
     return sanitized_sources
 
 
+# Clean source metadata objects so API consumers always get the same shape.
 def _sanitize_source_data(source_data: Any) -> list[dict[str, Any]]:
     if not isinstance(source_data, list):
         return []
@@ -73,6 +79,7 @@ def _sanitize_source_data(source_data: Any) -> list[dict[str, Any]]:
     return sanitized_source_data
 
 
+# Protect the chat flow from malformed RAG results.
 def _normalize_result(result: Any) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {
@@ -93,6 +100,7 @@ def _normalize_result(result: Any) -> dict[str, Any]:
     return normalized_result
 
 
+# Turn source data into a bounded text block for the validation prompt.
 def _format_source_data_for_validation(source_data: list[dict[str, Any]]) -> str:
     if not source_data:
         return "No source data was retrieved."
@@ -130,6 +138,7 @@ def _format_source_data_for_validation(source_data: list[dict[str, Any]]) -> str
     return "\n\n".join(formatted_sources)
 
 
+# Build the validator prompt that audits the generated answer.
 def _validation_prompt(query: str, answer: str, source_data: list[dict[str, Any]]) -> str:
     source_block = _format_source_data_for_validation(source_data)
 
@@ -206,6 +215,7 @@ Format:
 """
 
 
+# Extract the first JSON object from the validator's raw text response.
 def _extract_json_object(raw_text: str) -> dict[str, Any]:
     if not raw_text:
         raise ValueError("Validator returned an empty response.")
@@ -224,6 +234,7 @@ def _extract_json_object(raw_text: str) -> dict[str, Any]:
     return payload
 
 
+# Convert validation scores into the final accept, flag, or reject state.
 def _derive_decision(
     *,
     accuracy: int,
@@ -238,6 +249,7 @@ def _derive_decision(
     return "FLAG"
 
 
+# Clamp and normalize validator output into the expected schema.
 def _normalize_validation(payload: dict[str, Any]) -> dict[str, Any]:
     def clamp_score(key: str) -> int:
         value = payload.get(key, 0)
@@ -275,6 +287,7 @@ def _normalize_validation(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Convert validation details into the response metrics returned to the frontend.
 def build_validation_metrics(validation: dict[str, Any]) -> dict[str, Any]:
     confidence = round(
         (
@@ -295,6 +308,7 @@ def build_validation_metrics(validation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Send validation metrics to LangSmith when a traced run is active.
 def _record_langsmith_feedback(validation: dict[str, Any]) -> None:
     try:
         current_run = get_current_run_tree()
@@ -322,6 +336,7 @@ def _record_langsmith_feedback(validation: dict[str, Any]) -> None:
 
 
 @traceable(name="response_validation")
+# Run a second-pass validation over the answer using the retrieved sources.
 def validate_response(query: str, normalized_result: dict[str, Any]) -> dict[str, Any]:
     prompt = _validation_prompt(
         _safe_text(query),
@@ -340,6 +355,7 @@ def validate_response(query: str, normalized_result: dict[str, Any]) -> dict[str
 
 
 @traceable
+# Orchestrate the full chat flow: retrieve, answer, validate, persist, and summarize.
 def get_chat_response(query: str, chat_id: str, user: dict[str, Any]) -> dict[str, Any]:
     normalized_query = _safe_text(query)
     if not normalized_query:
@@ -380,6 +396,7 @@ def get_chat_response(query: str, chat_id: str, user: dict[str, Any]) -> dict[st
     return normalized_result
 
 
+# Create a new chat document with default metadata.
 def generate_new_chat(data: Any, user: dict[str, Any]) -> dict[str, str]:
     now = datetime.now(timezone.utc)
     title = _safe_text(getattr(data, "title", "")) or DEFAULT_CHAT_TITLE
@@ -399,6 +416,7 @@ def generate_new_chat(data: Any, user: dict[str, Any]) -> dict[str, str]:
     }
 
 
+# Return the current user's chat list for the sidebar.
 def get_chat_list(user: dict[str, Any]) -> list[dict[str, Any]]:
     chats = chats_collection.find(
         {"user_id": str(user["_id"])},
@@ -416,6 +434,7 @@ def get_chat_list(user: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+# Return all messages for one user-owned chat.
 def get_chat_messages(chat_id: str, user: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     chat_doc = _get_owned_chat(chat_id, user)
     messages = messages_collection.find({"chat_id": chat_doc["_id"]}).sort(
