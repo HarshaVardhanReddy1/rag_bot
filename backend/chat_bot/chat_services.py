@@ -1,5 +1,4 @@
 import json
-import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -32,7 +31,6 @@ load_dotenv()
 
 rag_chain = get_rag_chain()
 langsmith_client = Client()
-logger = logging.getLogger(__name__)
 
 
 # Normalize any incoming value into a trimmed string.
@@ -332,7 +330,7 @@ def _record_langsmith_feedback(validation: dict[str, Any]) -> None:
                 value=value,
             )
     except Exception:
-        logger.exception("Failed to write validation feedback to LangSmith.")
+        pass
 
 
 @traceable(name="response_validation")
